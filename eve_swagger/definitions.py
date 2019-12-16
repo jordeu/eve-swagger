@@ -8,10 +8,32 @@
     :license: BSD, see LICENSE for more details.
 """
 from collections import OrderedDict
+
 from flask import current_app as app
+from requests.utils import quote
 
 INFO = "SWAGGER_INFO"
 HOST = "SWAGGER_HOST"
+
+
+def _key(val):
+    return val.replace('/', ' ').replace('_', ' ').replace('-', ' ').title().replace(' ', '')
+
+
+def _quote(val):
+    return quote(val, safe='#/_')
+
+
+def ref(url):
+    return {"$ref": _quote(url)}
+
+
+def object_id():
+    return {
+        "type": "string",
+        "format": "objectId",
+        "example": "5dcb8754da2720ac4aa11411"
+    }
 
 
 def definitions():
@@ -23,10 +45,10 @@ def definitions():
     for rd in app.config["DOMAIN"].values():
         if rd.get("disable_documentation"):
             continue
-        title = rd["item_title"]
-        definitions[title] = _object(rd, dr_sources)
+        url = rd["url"]
+        definitions[_key(url)] = _object(rd, dr_sources)
         if "description" in rd:
-            definitions[title]["description"] = rd["description"]
+            definitions[_key(url)]["description"] = rd["description"]
 
     # add data_relation source fields to #/components/schemas/
     definitions.update(dr_sources)
@@ -34,14 +56,15 @@ def definitions():
     error_schema = {
         "type": "object",
         "properties": {
-            "_status": {"type": "string", "example": "OK"},
+            "_status": {"type": "string", "example": "ERR"},
             "_error": {
                 "type": "object",
                 "properties": {
-                    "code": {"type": "integer"},
-                    "message": {"type": "string"},
+                    "code": {"type": "integer", "example": 400},
+                    "message": {"type": "string",
+                                "example": "The browser (or proxy) sent a request that this server could not understand."},
                 },
-            },
+            }
         },
         "required": ["_status", "_error"],
     }
@@ -64,7 +87,10 @@ def _object(rd, dr_sources):
 
             # replace None in dr_sources with the field properties
             dr_sources[def_name] = OrderedDict(props[field])
-            props[field] = {"$ref": "#/components/schemas/{}".format(def_name)}
+            if field == "_id":
+                props[field] = object_id()
+            else:
+                props[field] = ref("#/components/schemas/{}".format(_key(def_name)))
 
         if "data_relation" in rules:
             # the current field is a copy of another field
@@ -73,8 +99,11 @@ def _object(rd, dr_sources):
                 # source of data_relation does not exist
                 continue
             title = app.config["DOMAIN"][dr["resource"]]["item_title"]
-            source_def_name = title + "_" + dr["field"]
-            props[field] = {"$ref": "#/components/schemas/{}".format(source_def_name)}
+            if dr["field"] == "_id":
+                props[field] = object_id()
+            else:
+                source_def_name = title + "_" + dr["field"]
+                props[field] = ref("#/components/schemas/{}".format(_key(source_def_name)))
 
     field_def = {}
     field_def["type"] = "object"
@@ -91,6 +120,7 @@ def _field_props(rules, dr_sources, prefix):
         "list": ("array",),
         "objectid": ("string", "objectid"),
         "datetime": ("string", "date-time"),
+        "media": ("string", "media"),
         "float": ("number", "float"),
         "point": ("geometry", "Point"),
         "multipoint": ("geometry", "MultiPoint"),
@@ -99,7 +129,13 @@ def _field_props(rules, dr_sources, prefix):
         "polygon": ("geometry", "Polygon"),
         "multipolygon": ("geometry", "MultiPolygon"),
         "geometrycollection": ("geometry", "GeometryCollection"),
+        "blob": ("string", "base64"),
+        "json": ("string", "json")
     }
+
+    for xof in ["anyOf", "allOf", "oneOf"]:
+        if xof.lower() in rules:
+            return {xof: [_field_props(d, dr_sources, prefix) for d in rules[xof.lower()]]}
 
     eve_type = rules.get("type")
     if eve_type is None:
@@ -230,12 +266,12 @@ def _get_dr_sources(schema):
     for rules in schema.values():
         if "data_relation" in rules:
             dr = rules["data_relation"]
-            if dr["resource"] not in app.config["DOMAIN"]:
+            if dr["resource"] not in app.config["DOMAIN"] or dr["field"] == "_id":
                 # source of data_relation does not exist
                 continue
             title = app.config["DOMAIN"][dr["resource"]]["item_title"]
             def_name = title + "_" + dr["field"]
-            dr_sources[def_name] = None
+            dr_sources[_key(def_name)] = None
         elif "schema" in rules:
             if rules.get("type") in "dict":
                 # recursively handle data_relations in subdicts

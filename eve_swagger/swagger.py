@@ -9,6 +9,7 @@
 """
 import re
 from collections import Mapping, OrderedDict
+
 from flask import (
     Blueprint,
     jsonify,
@@ -32,8 +33,7 @@ from .objects import (
     external_docs,
     headers,
     links,
-    callbacks,
-    examples,
+    callbacks
 )
 from .paths import paths
 
@@ -72,7 +72,6 @@ def _compile_docs(swagger):
     node(components, "schemas", definitions())
     node(components, "responses", responses())
     node(components, "parameters", parameters())
-    node(components, "examples", examples())
     node(components, "requestBodies", request_bodies())
     node(components, "headers", headers())
     node(components, "securitySchemes", security_schemes())

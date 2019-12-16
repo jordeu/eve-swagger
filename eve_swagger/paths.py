@@ -10,8 +10,21 @@ import re
 
 from collections import OrderedDict
 from textwrap import dedent
+from requests.utils import quote
 
 from flask import current_app as app
+
+
+def _key(val):
+    return val.replace('/', ' ').replace('_', ' ').replace('-', ' ').title().replace(' ', '')
+
+
+def _operation_id(val):
+    return re.sub('[^a-z0-9]', '_', val.lower().strip())
+
+
+def ref(url):
+    return {"$ref": quote(url, safe='#/')}
 
 
 def paths():
@@ -35,7 +48,7 @@ def paths():
 
         methods = rd["item_methods"]
         if methods:
-            item_id = "%sId" % rd["item_title"].lower()
+            item_id = "ResourceId" if rd["item_lookup_field"] == "_id" else "%sId" % rd["item_title"].lower()
             url = "/{}/{{{}}}".format(rd["url"], item_id)
             paths[url] = _item(resource, rd, methods)
 
@@ -96,35 +109,31 @@ def _item(resource, rd, methods):
 
 
 def get_ref_schema(rd):
-    return {"$ref": "#/components/schemas/%s" % rd["item_title"]}
+    return ref("#/components/schemas/%s" % _key(rd["url"]))
 
 
 def get_ref_parameter(rd):
-    return {
-        "$ref": "#/components/parameters/%s" % rd["item_title"]
-        + "_"
-        + rd["item_lookup_field"]
-    }
+    return ref("#/components/parameters/%s" % _key(rd["item_title"] + "_" + rd["item_lookup_field"]))
 
 
 def get_ref_ifmatch():
-    return {"$ref": "#/components/parameters/If-Match"}
+    return ref("#/components/parameters/{}".format(_key("If-Match")))
 
 
 def get_ref_requestBody(rd):
-    return {"$ref": "#/components/requestBodies/%s" % rd["item_title"]}
+    return ref("#/components/requestBodies/%s" % _key(rd["url"]))
 
 
 def get_ref_response(label):
-    return {"$ref": "#/components/responses/%s" % label}
+    return ref("#/components/responses/%s" % _key(label))
 
 
 def get_ref_query():
     return [
-        {"$ref": "#/components/parameters/query__where"},
-        {"$ref": "#/components/parameters/query__sort"},
-        {"$ref": "#/components/parameters/query__page"},
-        {"$ref": "#/components/parameters/query__max_results"},
+        ref("#/components/parameters/{}".format(_key("query__where"))),
+        ref("#/components/parameters/{}".format(_key("query__sort"))),
+        ref("#/components/parameters/{}".format(_key("query__page"))),
+        ref("#/components/parameters/{}".format(_key("query__max_results")))
     ]
 
 
@@ -155,7 +164,32 @@ def get_response(rd):
                                 "schema": {
                                     "type": "object",
                                     "properties": {
-                                        app.config["ITEMS"]: {
+                                        "_total": {
+                                            "type": "integer",
+                                            "description": "total number of items",
+                                            "example": 1
+                                        },
+                                        "_meta": {
+                                            "type": "object",
+                                            "properties": {
+                                                "max_results": {
+                                                    "type": "integer",
+                                                    "description": "maximum items per page",
+                                                    "example": 25,
+                                                },
+                                                "total": {
+                                                    "type": "integer",
+                                                    "description": "total number of items",
+                                                    "example": 1
+                                                },
+                                                "page": {
+                                                    "type": "integer",
+                                                    "description": "current results page",
+                                                    "example": 1
+                                                }
+                                            }
+                                        },
+                                        "_items": {
                                             "type": "array",
                                             "items": get_ref_schema(rd),
                                         }
@@ -168,7 +202,7 @@ def get_response(rd):
                 },
             ),
             ("parameters", get_ref_query()),
-            ("operationId", "get" + title),
+            ("operationId", _operation_id(rd["url"] + " get")),
             ("tags", [rd["item_title"]]),
         ]
     )
@@ -198,7 +232,7 @@ def post_response(rd):
                 },
             ),
             ("parameters", []),
-            ("operationId", "post" + rd["resource_title"]),
+            ("operationId", _operation_id(rd["url"] + " post")),
             ("tags", [rd["item_title"]]),
         ]
     )
@@ -219,7 +253,7 @@ def delete_response(rd):
                 },
             ),
             ("parameters", []),
-            ("operationId", "delete" + rd["resource_title"]),
+            ("operationId", _operation_id(rd["url"] + " delete")),
             ("tags", [rd["item_title"]]),
         ]
     )
@@ -248,7 +282,6 @@ def getitem_response_additional_lookup(rd):
                 },
             ),
             ("parameters", [additional_lookup_parameter(rd)]),
-            ("operationId", "get" + title + "ItemBy" + field.title()),
             ("tags", [rd["item_title"]]),
         ]
     )
@@ -276,7 +309,7 @@ def getitem_response(rd):
                 },
             ),
             ("parameters", [id_parameter(rd)]),
-            ("operationId", "get" + title + "Item"),
+            ("operationId", _operation_id(rd["url"] + " item get")),
             ("tags", [rd["item_title"]]),
         ]
     )
@@ -299,7 +332,7 @@ def put_response(rd):
             ),
             ("requestBody", get_ref_requestBody(rd)),
             ("parameters", [id_parameter(rd), get_ref_ifmatch()]),
-            ("operationId", "put" + title + "Item"),
+            ("operationId", _operation_id(rd["url"] + " put")),
             ("tags", [title]),
         ]
     )
@@ -322,7 +355,7 @@ def patch_response(rd):
             ),
             ("requestBody", get_ref_requestBody(rd)),
             ("parameters", [id_parameter(rd), get_ref_ifmatch()]),
-            ("operationId", "patch" + title + "Item"),
+            ("operationId", _operation_id(rd["url"] + " patch")),
             ("tags", [title]),
         ]
     )
@@ -344,7 +377,7 @@ def deleteitem_response(rd):
                 },
             ),
             ("parameters", [id_parameter(rd), get_ref_ifmatch()]),
-            ("operationId", "delete" + title + "Item"),
+            ("operationId", _operation_id(rd["url"] + " item delete")),
             ("tags", [rd["item_title"]]),
         ]
     )
@@ -354,19 +387,17 @@ def deleteitem_response(rd):
 
 
 def additional_lookup_parameter(rd):
-    return {
-        "$ref": "#/components/parameters/{}_{}".format(
-            rd["item_title"], rd["additional_lookup"]["field"]
-        )
-    }
+    parameter_key = _key("{}_{}".format(rd["item_title"], rd["additional_lookup"]["field"]))
+    return ref("#/components/parameters/{}".format(parameter_key))
 
 
 def id_parameter(rd):
-    return {
-        "$ref": "#/components/parameters/{}_{}".format(
-            rd["item_title"], rd["item_lookup_field"]
-        )
-    }
+
+    if rd["item_lookup_field"] == "_id":
+        return ref("#/components/parameters/ResourceId")
+
+    parameter_key = _key("{}_{}".format(rd["item_title"], rd["item_lookup_field"]))
+    return ref("#/components/parameters/{}".format(parameter_key))
 
 
 def _hook_descriptions(resource, method, item=False):

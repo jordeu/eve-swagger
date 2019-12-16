@@ -9,12 +9,25 @@
 """
 import sys
 from collections import OrderedDict
+from requests.utils import quote
 from flask import request, current_app as app
 from eve.auth import BasicAuth, TokenAuth
 
 from .validation import validate_info
 from .paths import get_ref_schema
 from .definitions import INFO, HOST
+
+
+def _key(val):
+    return val.replace('/', ' ').replace('_', ' ').replace('-', ' ').title().replace(' ', '')
+
+
+def _quote(val):
+    return quote(val, safe='#/_')
+
+
+def ref(url):
+    return {"$ref": _quote(url)}
 
 
 def _get_scheme():
@@ -51,10 +64,10 @@ def servers():
 
 def responses():
     return {
-        "error": {
+        "Error": {
             "description": "An error message",
             "content": {
-                "application/json": {"schema": {"$ref": "#/components/schemas/Error"}}
+                "application/json": {"schema": ref("#/components/schemas/Error")}
             },
         }
     }
@@ -68,9 +81,25 @@ def parameters():
             continue
 
         title = rd["item_title"]
+        if "additional_lookup" in rd:
+            lookup_field = rd["additional_lookup"]["field"]
+            descr = rd["schema"][lookup_field].get("description") or ""
+            example = rd["schema"][lookup_field].get("example") or ""
+
+            p = OrderedDict()
+            p["in"] = "path"
+            p["name"] = rd["additional_lookup"]["field"].title()
+            p["required"] = True
+            p["description"] = descr
+            p["example"] = example
+            p["schema"] = {"type": "string"}
+
+            parameters[_key(title + "_" + lookup_field)] = p
+
         lookup_field = rd["item_lookup_field"]
-        if lookup_field not in rd["schema"]:
-            rd["schema"][lookup_field] = {"type": "objectid"}
+        if lookup_field == "_id":
+            continue
+
         eve_type = rd["schema"][lookup_field]["type"]
         descr = rd["schema"][lookup_field].get("description") or ""
         example = rd["schema"][lookup_field].get("example") or ""
@@ -108,28 +137,22 @@ def parameters():
             pass
 
         p["schema"] = {"type": ptype}
-        parameters[title + "_" + lookup_field] = p
-
-        # additional_lookup
-        if "additional_lookup" in rd:
-            lookup_field = rd["additional_lookup"]["field"]
-            descr = rd["schema"][lookup_field].get("description") or ""
-            example = rd["schema"][lookup_field].get("example") or ""
-
-            p = OrderedDict()
-            p["in"] = "path"
-            p["name"] = rd["additional_lookup"]["field"].title()
-            p["required"] = True
-            p["description"] = descr
-            p["example"] = example
-            p["schema"] = {"type": "string"}
-
-            parameters[title + "_" + lookup_field] = p
+        parameters[_key(title + "_" + lookup_field)] = p
 
     # add header parameters
     parameters.update(_header_parameters())
     # add query parameters
     parameters.update(_query_parameters())
+
+    # add ObjectId parameter
+    r = OrderedDict()
+    r["in"] = "path"
+    r["name"] = "ResourceId"
+    r["required"] = True
+    r["description"] = "Resource identifier (the object *'_id'* field)"
+    r["schema"] = {"type": "string", "example": "5dcb8754da2720ac4aa11411"}
+    parameters["ResourceId"] = r
+
     return parameters
 
 
@@ -139,30 +162,30 @@ def _query_parameters():
     r = OrderedDict()
     r["in"] = "query"
     r["name"] = app.config["QUERY_WHERE"]
-    r["description"] = 'the filters query parameter (ex.: {"number": 10})'
-    r["schema"] = {"type": "string"}
-    params["query__where"] = r
+    r["description"] = 'MongoDB like query expressions to filter the results.'
+    r["schema"] = {"type": "string", "example": "{\"number\": 10}"}
+    params[_key("query__where")] = r
 
     r = OrderedDict()
     r["in"] = "query"
     r["name"] = app.config["QUERY_SORT"]
-    r["description"] = 'the sort query parameter (ex.: "city,-lastname")'
-    r["schema"] = {"type": "string"}
-    params["query__sort"] = r
+    r["description"] = 'MongoDB like sorting expressions.'
+    r["schema"] = {"type": "string", "example": "[(\"lastname\", -1)]"}
+    params[_key("query__sort")] = r
 
     r = OrderedDict()
     r["in"] = "query"
     r["name"] = app.config["QUERY_PAGE"]
-    r["description"] = "the pages query parameter"
+    r["description"] = "page to return (starts at one)"
     r["schema"] = {"type": "integer", "example": 1}
-    params["query__page"] = r
+    params[_key("query__page")] = r
 
     r = OrderedDict()
     r["in"] = "query"
     r["name"] = app.config["QUERY_MAX_RESULTS"]
-    r["description"] = "the max results query parameter"
+    r["description"] = "maximum items to return per page"
     r["schema"] = {"type": "integer", "example": 25}
-    params["query__max_results"] = r
+    params[_key("query__max_results")] = r
 
     return params
 
@@ -174,35 +197,10 @@ def _header_parameters():
     r["description"] = "Current value of the _etag field"
     r["required"] = app.config["IF_MATCH"] and app.config["ENFORCE_IF_MATCH"]
     r["schema"] = {"type": "string"}
-    return {"If-Match": r}
-
-
-def examples():
-    examples = OrderedDict()
-
-    for (resource_name, rd) in app.config["DOMAIN"].items():
-        if resource_name.endswith("_versions") or rd.get("disable_documentation"):
-            continue
-
-        title = rd["item_title"]
-        ex = OrderedDict()
-        ex["summary"] = "An example {0} document."
-        ex["description"] = (
-            "An example for {0} documents request bodies."
-            " Used in POST, PUT, PATCH methods."
-        ).format(title)
-        if "example" in rd:
-            ex["value"] = rd["example"]
-
-        examples[title] = ex
-
-    return examples
+    return {_key("If-Match"): r}
 
 
 def request_bodies():
-    def _get_ref_examples(rd):
-        return {"$ref": "#/components/examples/%s" % rd["item_title"]}
-
     rbodies = OrderedDict()
 
     for (resource_name, rd) in app.config["DOMAIN"].items():
@@ -220,11 +218,18 @@ def request_bodies():
         rb["content"] = {
             # TODO what about other methods
             "application/json": {
-                "schema": get_ref_schema(rd),
-                "examples": {title: _get_ref_examples(rd)},
+                "schema": get_ref_schema(rd)
             }
         }
-        rbodies[title] = rb
+
+        # Add examples
+        if "example" in rd:
+            if isinstance(rd["example"], list):
+                rb["content"]["application/json"]["examples"] = {"{}".format(i): v for i, v in enumerate(rd["example"])}
+            else:
+                rb["content"]["application/json"]["example"] = rd["example"]
+
+        rbodies[_key(rd["url"])] = rb
 
     return rbodies
 
@@ -280,15 +285,20 @@ def security():
 
 def tags():
     tags = []
+    names = []
     for (resource_name, rd) in app.config["DOMAIN"].items():
         if resource_name.endswith("_versions") or rd.get("disable_documentation"):
             continue
 
-        tagInfo = {"name": rd["item_title"]}
+        name = rd["item_title"]
+        if name in names:
+            continue
 
+        tagInfo = {"name": name}
         if "description" in rd:
             tagInfo["description"] = rd["description"]
 
+        names.append(name)
         tags.append(tagInfo)
     return tags
 
